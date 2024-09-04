@@ -581,7 +581,7 @@ int main(int argc, char *argv[]) {
     int numStages = program.get<int>("--num-stages");
     int numWarps = program.get<int>("--num-warps");
     bool enableFpFusion = program.get<bool>("--enable-fp-fusion");
-    auto libraryPaths = program.get<std::vector<std::string>>("--library");
+    auto libraryPaths = program.get<std::vector<std::string>>("--link");
     std::string outputPath;
     if (program.present("-o")) {
         outputPath = program.get<std::string>("-o");
