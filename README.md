@@ -40,3 +40,33 @@ module {
 ```commandline
 tritonc add_kernel.ttir --compute-capability 89 --num-stages 3 --num-warps 4 -o out.ptx
 ```
+
+### How to build
+
+#### Build LLVM
+
+The required llvm version is a submodule of this repository under `third_party/llvm-project`.
+
+Build-install the llvm-project system-wide.
+
+```commandline
+cd third_party/llvm-project
+mkdir build
+cd build
+cmake -G Ninja ../llvm -DLLVM_ENABLE_PROJECTS=mlir -DLLVM_BUILD_EXAMPLES=ON -DLLVM_TARGETS_TO_BUILD="Native;NVPTX;AMDGPU" -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON
+cmake --build .
+sudo make install
+```
+
+##### Hot to build tritonc
+
+With LLVM built and installed, you can now build tritonc.
+
+```commandline
+cd tritonc
+mkdir build
+cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+cmake --build . --parallel 16
+./tritonc --help
+```

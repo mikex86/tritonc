@@ -45,8 +45,6 @@
 #include <llvm/Linker/Linker.h>
 #include <llvm/Passes/OptimizationLevel.h>
 #include <llvm/Passes/PassBuilder.h>
-#include <llvm/Analysis/LoopAnalysisManager.h>
-#include <llvm/Analysis/CGSCCPassManager.h>
 #include <llvm/Transforms/InstCombine/InstCombine.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/MC/TargetRegistry.h>
