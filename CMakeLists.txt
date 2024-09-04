@@ -4,7 +4,7 @@ project(tritonc CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 
-set(TRITON_CODEGEN_BACKENDS "nvidia")
+set(TRITON_CODEGEN_BACKENDS "nvidia" CACHE STRING "Enable different codegen backends" FORCE)
 set(TRITON_BUILD_PYTHON_MODULE ON)
 set(TRITON_BUILD_PROTON OFF)
 set(PYTHON_INCLUDE_DIRS ON)
@@ -70,9 +70,9 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "ppc64le")
             LLVMPowerPCAsmParser
             LLVMPowerPCCodeGen
     )
-else ()
+else()
     message(FATAL_ERROR "LLVM codegen/ASM parser libs: This HW architecture (${CMAKE_SYSTEM_PROCESSOR}) is not configured in cmake lib dependencies.")
-endif ()
+endif()
 
 target_link_libraries(tritonc PRIVATE ${TRITON_LIBRARIES})
 

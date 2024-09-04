@@ -67,6 +67,6 @@ cd tritonc
 mkdir build
 cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
-cmake --build . --parallel 16
+cmake --build . --target tritonc -j 14
 ./tritonc --help
 ```
