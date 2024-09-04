@@ -122,9 +122,8 @@ mlir::OwningOpRef<mlir::ModuleOp> parseMlirModule(mlir::MLIRContext *context, co
         auto mod = mlir::parseSourceString<mlir::ModuleOp>(mlirString, context);
         engine.eraseHandler(id);
 
-        std::cerr << errorMsg << std::endl;
-
         if (!mod) {
+            std::cerr << errorMsg << std::endl;
             return nullptr;
         }
 
@@ -449,12 +448,12 @@ static std::string translateLLVMIRToASM(llvm::Module &module,
     for (llvm::Function &f: module.functions())
         if (!f.hasFnAttribute(llvm::Attribute::NoInline))
             f.addFnAttr(llvm::Attribute::AlwaysInline);
+
     // verify and store llvm
     llvm::legacy::PassManager pm;
     pm.add(llvm::createAlwaysInlinerLegacyPass());
     pm.add(llvm::createVerifierPass());
     pm.run(module);
-    // module->print(llvm::outs(), nullptr);
 
     // create machine
     module.setTargetTriple(triple);
@@ -555,7 +554,7 @@ int main(int argc, char *argv[]) {
             .default_value(true)
             .implicit_value(false);
 
-    program.add_argument("--library")
+    program.add_argument("--link")
             .help("Link against an LLVM bitcode module")
             .default_value(std::vector<std::string>{});
 
