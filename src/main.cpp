@@ -647,18 +647,17 @@ int main(int argc, char *argv[]) {
 
     program.add_argument("--num-stages")
             .help("Number of Stages")
-            .default_value(3)
+            .default_value(1)
             .scan<'i', int>();
 
     program.add_argument("--num-warps")
             .help("Number of Warps")
-            .default_value(2)
+            .default_value(4)
             .scan<'i', int>();
 
     program.add_argument("--enable-fp-fusion")
             .help("Enable floating point fusion")
-            .default_value(true)
-            .implicit_value(false);
+            .default_value(true);
 
     program.add_argument("--link")
             .help("Link against an LLVM bitcode module")
@@ -666,7 +665,7 @@ int main(int argc, char *argv[]) {
 
     program.add_argument("--ptx-version")
             .help("Target ptx version")
-            .default_value(83)
+            .default_value(84)
             .scan<'i', int>();
 
     /*
@@ -705,15 +704,49 @@ int main(int argc, char *argv[]) {
         libraryNames.push_back(libraryPath.substr(libraryPath.find_last_of('/') + 1));
     }
 
+    auto contents = readFileContents(inputFile);
+    std::stringstream content_out;
+
+    // process pragma directives
+    std::istringstream stream(contents);
+    std::string line;
+
+    while (std::getline(stream, line)) {
+        if (line.find("#pragma") == 0) {
+            std::string command = line.substr(8);
+            size_t space_idx = command.find(' ');
+            std::string directive = command.substr(0, space_idx);
+            std::string value = command.substr(space_idx + 1);
+            if (directive == "num_warps") {
+                int new_num_warps = std::stoi(value);
+                if (program.is_used("--num-warps") && new_num_warps != numWarps) {
+                    std::cerr
+                            << "[Warning] tritonc CLI argument --num-warps conflicts with source-level #pragma directive. Directive requests "
+                            << new_num_warps << ", while CLI argument requests " << numWarps << "!\nPrioritizing source-level directive over CLI argument..." << std::endl;
+                }
+                numWarps = new_num_warps;
+            } else if (directive == "num_stages") {
+                int new_num_stages = std::stoi(value);
+                if (program.is_used("--num-stages") && new_num_stages != numStages) {
+                    std::cerr
+                            << "[Warning] tritonc CLI argument --num-stages conflicts with source-level #pragma directive. Directive requests "
+                            << new_num_stages << ", while CLI argument requests " << numStages << "!\nPrioritizing source-level directive over CLI argument..." << std::endl;
+                }
+                numStages = new_num_stages;
+            }
+        } else {
+            content_out << line;
+        }
+    }
+
     LLVMInitializeNVPTXTargetInfo();
     LLVMInitializeNVPTXTarget();
     LLVMInitializeNVPTXTargetMC();
     LLVMInitializeNVPTXAsmPrinter();
 
-    auto contents = readFileContents(inputFile);
     mlir::MLIRContext *context = createContext();
     try {
-        compile(context, contents, computeCapability, ptxVersion, numCTAs, numStages, numWarps, enableFpFusion,
+        compile(context, content_out.str(), computeCapability, ptxVersion, numCTAs, numStages, numWarps, enableFpFusion,
                 libraryNames,
                 libraryPaths, "ptx", outputPath);
     } catch (const std::exception &e) {
