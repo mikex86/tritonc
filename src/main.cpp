@@ -1,6 +1,7 @@
 #include <iostream>
 #include <filesystem>
 #include <fstream>
+#include <unordered_set>
 #include <argparse/argparse.hpp>
 
 // LLVM targets
@@ -51,6 +52,9 @@
 #include <llvm/Transforms/IPO/AlwaysInliner.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Target/TargetMachine.h>
+#include <llvm/Passes/StandardInstrumentations.h>
+#include "NVGPUToLLVM/NVGPUToLLVMPass.h"
+#include "Target/LLVMIR/LLVMPasses.h"
 
 
 static mlir::MLIRContext *createContext() {
@@ -321,7 +325,7 @@ std::unique_ptr<llvm::Module>
 convertTTGIRToLLIR(
         llvm::LLVMContext &llvmContext,
         mlir::OwningOpRef<mlir::ModuleOp> &mod,
-        int computeCapability, bool isROCM,
+        int computeCapability, bool isROCM, int ptxVersion,
         const std::vector<std::string> &libraryNames,
         const std::vector<std::string> &libraryPaths) {
     mlir::DiagnosticEngine &engine = mod->getContext()->getDiagEngine();
@@ -356,11 +360,12 @@ convertTTGIRToLLIR(
 
     mlir::PassManager pm(mod->getContext());
     pm.addPass(mlir::triton::NVIDIA::createDecomposeUnsupportedConversionsPass());
+    pm.addPass(mlir::triton::gpu::createTritonGPUCombineTensorSelectAndIf());
     pm.addPass(mlir::createConvertSCFToCFPass());
     pm.addPass(mlir::createConvertIndexToLLVMPass());
     pm.addPass(mlir::triton::gpu::createAllocateSharedMemoryPass());
     pm.addPass(mlir::triton::createConvertTritonGPUToLLVMPass(computeCapability));
-    pm.addPass(mlir::createConvertNVGPUToNVVMPass());
+    pm.addPass(mlir::triton::createConvertNVGPUToLLVMPass());
     pm.addPass(mlir::createArithToLLVMConversionPass());
     pm.addPass(mlir::createCanonicalizerPass());
     pm.addPass(mlir::createCSEPass());
@@ -375,56 +380,127 @@ convertTTGIRToLLIR(
 
     auto llvmModule = mlir::translateModuleToLLVMIR(*mod, llvmContext);
 
-    if (!llvmModule) {
-        throw std::runtime_error("Failed to convert MLIR format LLVM IR to LLVM Module: " + errorMsg);
+    // attach data-layout
+    {
+        std::string error;
+        auto triple = "nvptx64-nvidia-cuda";
+        auto proc = (computeCapability == 90) ? "sm_90a" : "sm_" + std::to_string(computeCapability);
+        auto target = llvm::TargetRegistry::lookupTarget(triple, error);
+        if (!target) {
+            throw std::runtime_error("target lookup error: " + error);
+        }
+
+        std::string features = "+ptx" + std::to_string(ptxVersion);
+
+        llvm::TargetOptions opt;
+        // Target machine is only used to create the data layout.
+        std::unique_ptr<llvm::TargetMachine> machine{target->createTargetMachine(
+                triple, proc, features, opt, llvm::Reloc::PIC_, std::nullopt,
+                llvm::CodeGenOptLevel::None)};
+
+        // set data layout
+        llvmModule->setDataLayout(machine->createDataLayout());
     }
 
-    llvm::Type *i32 = llvm::Type::getInt32Ty(llvmContext);
-    auto *mdFour = llvm::ConstantAsMetadata::get(llvm::ConstantInt::getSigned(i32, 4));
-    auto *mdName = llvm::MDString::get(llvmContext, "nvvm-reflect-ftz");
-    auto *mdOne = llvm::ConstantAsMetadata::get(llvm::ConstantInt::getSigned(i32, 1));
-    auto *reflect = llvm::MDNode::get(llvmContext, {mdFour, mdName, mdOne});
-    llvmModule->addModuleFlag(reflect);
+    // set_nvvm_reflect_ftz
+    {
+        // please check https://llvm.org/docs/NVPTXUsage.html#reflection-parameters
+        // this will enable fast math path in libdevice
+        // for example, when enable nvvm-reflect-ftz, sqrt.approx.f32 will change to
+        // sqrt.approx.ftz.f32
+        using namespace llvm;
+        auto &ctx = llvmModule->getContext();
+        Type *i32 = Type::getInt32Ty(ctx);
+        auto *mdFour = ConstantAsMetadata::get(ConstantInt::getSigned(i32, 4));
+        auto *mdName = MDString::get(ctx, "nvvm-reflect-ftz");
+        auto *mdOne = ConstantAsMetadata::get(ConstantInt::getSigned(i32, 1));
+        auto *reflect = MDNode::get(ctx, {mdFour, mdName, mdOne});
+        llvmModule->addModuleFlag(reflect);
+    }
 
-    for (size_t i = 0; i < libraryNames.size(); ++i) {
-        const auto &libraryName = libraryNames[i];
-        const auto &libraryPath = libraryPaths[i];
+    // TODO: maxnreg
 
-        llvm::SMDiagnostic err;
-        auto extMod = llvm::parseIRFile(libraryPath, err, llvmContext);
-        if (!extMod) {
-            llvm::errs() << "Failed to load " << libraryPath;
-            continue;
-        }
-        extMod->setTargetTriple(llvmModule->getTargetTriple());
-        extMod->setDataLayout(llvmModule->getDataLayout());
-        if (llvm::Linker::linkModules(*llvmModule, std::move(extMod), llvm::Linker::Flags::LinkOnlyNeeded)) {
-            llvm::errs() << "Failed to link library " << libraryName << " at location " << libraryPath;
-            continue;
+    // link libraries
+    {
+        llvm::LLVMContext &ctx = llvmModule->getContext();
+        llvm::Linker linker(*llvmModule);
+        for (const std::string &path: libraryPaths) {
+            llvm::SMDiagnostic err;
+            std::unique_ptr<llvm::Module> libMod = llvm::parseIRFile(path, err, ctx);
+            if (!libMod) {
+                std::string message = "Failed to parse library at " + path;
+                throw std::invalid_argument(message);
+            }
+            libMod->setTargetTriple(llvmModule->getTargetTriple());
+            libMod->setDataLayout(llvmModule->getDataLayout());
+
+            std::unordered_set<std::string> externalFns;
+            for (llvm::Function &fn: libMod->functions()) {
+                if (!fn.isDeclaration())
+                    externalFns.insert(fn.getName().str());
+            }
+
+            if (linker.linkInModule(std::move(libMod),
+                                    llvm::Linker::Flags::LinkOnlyNeeded)) {
+                std::string message = "Failed to link library at " + path;
+                throw std::invalid_argument(message);
+            }
+
+            // Mark linked-in functions as internal because backends use external
+            // linkage as a signifier of kernel functions.
+            for (llvm::Function &fn: llvmModule->functions()) {
+                if (externalFns.count(fn.getName().str())) {
+                    fn.setLinkage(llvm::GlobalValue::InternalLinkage);
+                }
+            }
         }
     }
 
-    llvm::OptimizationLevel opt = llvm::OptimizationLevel::O3;
+    // optimize module
+    {
+        llvm::LoopAnalysisManager lam;
+        llvm::FunctionAnalysisManager fam;
+        llvm::CGSCCAnalysisManager cgam;
+        llvm::ModuleAnalysisManager mam;
 
-    llvm::PassBuilder pb;
-    llvm::LoopAnalysisManager lam;
-    llvm::FunctionAnalysisManager fam;
-    llvm::CGSCCAnalysisManager cgam;
-    llvm::ModuleAnalysisManager mam;
+        llvm::PassInstrumentationCallbacks *instrCbPtr = nullptr;
+        llvm::PassInstrumentationCallbacks passInstrCb;
+        llvm::StandardInstrumentations standardInstr(llvmModule->getContext(),
+                /*DebugLogging*/ true);
 
-    pb.registerModuleAnalyses(mam);
-    pb.registerCGSCCAnalyses(cgam);
-    pb.registerFunctionAnalyses(fam);
-    pb.registerLoopAnalyses(lam);
-    pb.crossRegisterProxies(lam, fam, cgam, mam);
+        llvm::PipelineTuningOptions tuningOptions;
+        tuningOptions.LoopUnrolling = true;
+        tuningOptions.LoopInterleaving = true;
+        tuningOptions.LoopVectorization = true;
+        // TODO: currently we run SLP vectorizer with an empty target machine.
+        // This cause the vectorizer to create larger vector which could be bad.
+        // Disabling it would currently cause regressions as this pass also applies
+        // some scheduling that helps performance in some cases. We should work on
+        // using NVPTX target instead and address the performance regressions with
+        // some scheduling solution.
+        tuningOptions.SLPVectorization = true;
 
-    llvm::ModulePassManager mpm;
-    pb.registerVectorizerStartEPCallback([&](llvm::FunctionPassManager &fpm, llvm::OptimizationLevel level) {
-        fpm.addPass(llvm::InstCombinePass());
-    });
+        llvm::PassBuilder pb(nullptr /*targetMachine*/, tuningOptions, std::nullopt,
+                             instrCbPtr);
 
-    mpm.addPass(pb.buildPerModuleDefaultPipeline(opt));
-    mpm.run(*llvmModule, mam);
+        pb.registerModuleAnalyses(mam);
+        pb.registerCGSCCAnalyses(cgam);
+        pb.registerFunctionAnalyses(fam);
+        pb.registerLoopAnalyses(lam);
+        pb.crossRegisterProxies(lam, fam, cgam, mam);
+
+        llvm::ModulePassManager mpm;
+        pb.registerVectorizerStartEPCallback(
+                [&](llvm::FunctionPassManager &fpm, llvm::OptimizationLevel level) {
+                    // Triton generates large structure of scalars which may pessimise
+                    // optimizations, we run a pass to break up phi of struct to make
+                    // sure all the struct are removed for the following passes.
+                    fpm.addPass(llvm::BreakStructPhiNodesPass());
+                    fpm.addPass(llvm::InstCombinePass());
+                });
+        mpm.addPass(pb.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3));
+        mpm.run(*llvmModule, mam);
+    }
 
     return llvmModule;
 }
@@ -498,10 +574,12 @@ static std::string translateToAsm(llvm::Module &module,
     );
 }
 
-void compile(mlir::MLIRContext *context, const std::string &contents, int computeCapability, int numCTAs, int numStages,
-             int numWarps, bool enableFpFusion, const std::vector<std::string> &libraryNames,
-             const std::vector<std::string> &libraryPaths, const std::string &upToStage,
-             const std::string &outputPath) {
+void
+compile(mlir::MLIRContext *context, const std::string &contents, int computeCapability, int ptxVersion, int numCTAs,
+        int numStages,
+        int numWarps, bool enableFpFusion, const std::vector<std::string> &libraryNames,
+        const std::vector<std::string> &libraryPaths, const std::string &upToStage,
+        const std::string &outputPath) {
     auto module = parseMlirModule(context, contents);
 
     if (llvm::failed(optimizeTtir(module))) {
@@ -513,11 +591,39 @@ void compile(mlir::MLIRContext *context, const std::string &contents, int comput
     }
 
     llvm::LLVMContext llvmContext{};
-    auto llvmModule = convertTTGIRToLLIR(llvmContext, module, computeCapability, false, libraryNames, libraryPaths);
+    auto llvmModule = convertTTGIRToLLIR(llvmContext, module, computeCapability, false, ptxVersion, libraryNames,
+                                         libraryPaths);
 
     std::string proc = computeCapability == 90 ? "sm_90a" : "sm_" + std::to_string(computeCapability);
     std::string ptxCode = translateToAsm(*llvmModule, "nvptx64-nvidia-cuda", proc, "", {"nvptx-short-ptr"},
                                          enableFpFusion, false);
+
+    // post process
+    std::string ptx_version = std::to_string(ptxVersion / 10) + "." + std::to_string(ptxVersion % 10);
+
+    // replace ptx version
+    {
+        size_t index = ptxCode.find("\n.version ");
+        ptxCode = ptxCode.substr(0, index + 10) + ptx_version + ptxCode.substr(ptxCode.find('\n', index + 1));
+    }
+
+    // strip debug flag that prevent ptxas from optimizing the code
+    {
+        size_t index = ptxCode.find("\n.target ");
+        size_t endLineIdx = ptxCode.find('\n', index + 1);
+
+        size_t i;
+        bool found = false;
+        for (i = index + 9; i < endLineIdx; i++) {
+            if (ptxCode[i] == ',') {
+                found = true;
+                break;
+            }
+        }
+        if (found) {
+            ptxCode = ptxCode.substr(0, i) + ptxCode.substr(endLineIdx);
+        }
+    }
 
     std::ofstream stream(outputPath);
     stream << ptxCode;
@@ -558,6 +664,11 @@ int main(int argc, char *argv[]) {
             .help("Link against an LLVM bitcode module")
             .default_value(std::vector<std::string>{});
 
+    program.add_argument("--ptx-version")
+            .help("Target ptx version")
+            .default_value(83)
+            .scan<'i', int>();
+
     /*
     program.add_argument("--up-to")
             .help("Specify up to which stage to compile (llvm, ptx)")
@@ -577,6 +688,7 @@ int main(int argc, char *argv[]) {
 
     auto inputFile = program.get<std::string>("input_file");
     int computeCapability = program.get<int>("--compute-capability");
+    int ptxVersion = program.get<int>("--ptx-version");
     int numCTAs = program.get<int>("--num-ctas");
     int numStages = program.get<int>("--num-stages");
     int numWarps = program.get<int>("--num-warps");
@@ -601,7 +713,8 @@ int main(int argc, char *argv[]) {
     auto contents = readFileContents(inputFile);
     mlir::MLIRContext *context = createContext();
     try {
-        compile(context, contents, computeCapability, numCTAs, numStages, numWarps, enableFpFusion, libraryNames,
+        compile(context, contents, computeCapability, ptxVersion, numCTAs, numStages, numWarps, enableFpFusion,
+                libraryNames,
                 libraryPaths, "ptx", outputPath);
     } catch (const std::exception &e) {
         std::cerr << e.what() << std::endl;

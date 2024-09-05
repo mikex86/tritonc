@@ -80,6 +80,7 @@ target_link_libraries(tritonc PRIVATE ${TRITON_LIBRARIES})
 # hence we have to do this...
 set(TRITON_INCLUDE_DIRS
         "third_party/triton/include"
+        "third_party/triton/lib"
         "third_party/triton/third_party/nvidia/include"
 )
 set(TRITON_GENERATED_INCLUDE_DIRS
