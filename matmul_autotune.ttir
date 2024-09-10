@@ -1,7 +1,7 @@
-#pragma autotune BLOCK_SIZE_M {128, 256} default 256
-#pragma autotune BLOCK_SIZE_N {128, 256} default 128
+#pragma autotune BLOCK_SIZE_M {128, 256} default 128
+#pragma autotune BLOCK_SIZE_N {128, 256} default 256
 #pragma autotune BLOCK_SIZE_K {32, 64} default 32
-#pragma autotune GROUP_SIZE_M {8, 12, 16, 20, 24} default 32
+#pragma autotune GROUP_SIZE_M {8, 12, 16, 20, 24} default 8
 #pragma autotune intrinsic num_warps {4, 8} default 8
 #pragma autotune intrinsic num_stages {3, 4, 5} default 3
 

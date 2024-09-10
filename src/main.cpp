@@ -385,7 +385,6 @@ int main(int argc, char *argv[]) {
                                                        enableFpFusion,
                                                        libraryNames,
                                                        libraryPaths, "ptx");
-
             std::ofstream ostream(outputPath);
             ostream << "// Shared memory requirements: " << std::to_string(shared_mem_bytes) << '\n';
             ostream << ptxCode;
