@@ -2,6 +2,13 @@ cmake_minimum_required(VERSION 3.28)
 
 project(tritonc CXX)
 
+# Enable exceptions
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-fexceptions)
+elseif (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    add_compile_options(/EHsc)
+endif ()
+
 set(CMAKE_CXX_STANDARD 17)
 
 set(TRITON_CODEGEN_BACKENDS "nvidia" CACHE STRING "Enable different codegen backends" FORCE)
@@ -12,10 +19,25 @@ set(PYTHON_INCLUDE_DIRS ON)
 add_subdirectory(third_party/argparse)
 add_subdirectory(third_party/triton)
 
-add_executable(tritonc src/main.cpp)
+add_executable(tritonc src/main.cpp
+        src/tritonc.cpp
+        src/autotuner.cpp
+        src/kernel_runner.cpp
+        src/tinyscript.cpp
+        src/templating.cpp)
 target_link_libraries(tritonc PRIVATE argparse)
+target_link_libraries(tritonc PRIVATE cuda curand)
 
 get_property(triton_libs GLOBAL PROPERTY TRITON_LIBS)
+
+# we need to hackishly turn an assert into an exception because it is violated very often...
+# we thus need to define something to override assert() for target TritonTools
+# we manually set the include guard _ASSERT_H_DECLS so that __assert_fail doesn't get defined.
+# we declare a macro that redirects __assert_fail
+# (yikes)
+target_compile_definitions(TritonTools PRIVATE "_ASSERT_H_DECLS=1")
+target_compile_options(TritonTools PRIVATE -include "${CMAKE_SOURCE_DIR}/include_hacks/fake_except_assert.h")
+target_compile_options(TritonTools PRIVATE -Wno-terminate) # grr
 
 set(TRITON_LIBRARIES
         ${triton_libs}
@@ -70,9 +92,9 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "ppc64le")
             LLVMPowerPCAsmParser
             LLVMPowerPCCodeGen
     )
-else()
+else ()
     message(FATAL_ERROR "LLVM codegen/ASM parser libs: This HW architecture (${CMAKE_SYSTEM_PROCESSOR}) is not configured in cmake lib dependencies.")
-endif()
+endif ()
 
 target_link_libraries(tritonc PRIVATE ${TRITON_LIBRARIES})
 
