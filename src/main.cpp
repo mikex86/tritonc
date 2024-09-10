@@ -3,10 +3,10 @@
 #include <fstream>
 #include <unordered_set>
 #include <argparse/argparse.hpp>
-#include <csignal>
 
 #include "tritonc.h"
 #include "autotuner.h"
+#include "templating.h"
 
 std::string readFileContents(const std::filesystem::path &path) {
     std::ifstream file(path);
@@ -137,6 +137,11 @@ int main(int argc, char *argv[]) {
             .default_value(84)
             .scan<'i', int>();
 
+    program.add_argument("--no-autotune")
+            .help("Disables auto-tuning and uses specified defaults for autotune-constants")
+            .implicit_value(true)
+            .default_value(false);
+
     /*
     program.add_argument("--up-to")
             .help("Specify up to which stage to compile (llvm, ptx)")
@@ -162,6 +167,8 @@ int main(int argc, char *argv[]) {
     int numWarps = program.get<int>("--num-warps");
     bool enableFpFusion = program.get<bool>("--enable-fp-fusion");
     auto libraryPaths = program.get<std::vector<std::string>>("--link");
+    bool noAutotune = program.get<bool>("--no-autotune");
+
     std::string outputPath;
     if (program.present("-o")) {
         outputPath = program.get<std::string>("-o");
@@ -184,6 +191,8 @@ int main(int argc, char *argv[]) {
 
     std::vector<std::pair<std::string, std::vector<int>>> autotune_constants{};
     std::vector<std::pair<std::string, std::vector<int>>> autotune_intrinsic_constants{};
+    std::unordered_map<std::string, int> default_autotune_constants{};
+    std::unordered_map<std::string, int> default_intrinsic_autotune_constants{};
 
     std::vector<KernelArgument> kernel_arguments;
     std::optional<KernelLaunchBounds> launch_bounds = std::nullopt;
@@ -227,25 +236,53 @@ int main(int argc, char *argv[]) {
                 numStages = new_num_stages;
             } else if (directive == "autotune") {
                 should_autotune = true;
-                if (args.size() == 4) {
-                    if (args[1] == "intrinsic") {
+                if (args[1] == "intrinsic") {
+                    if (args.size() >= 4) {
                         const std::string &autotune_constant = args[2];
                         const std::string &autotune_rage = args[3];
                         auto range = parseArray(autotune_rage);
                         autotune_intrinsic_constants.emplace_back(autotune_constant, range);
-                        continue;
+                    }
+                    if (args.size() == 6) {
+                        if (args[4] == "default") {
+                            const std::string &autotune_constant = args[2];
+                            int value = std::stoi(args[5]);
+                            default_autotune_constants[autotune_constant] = value;
+                        } else {
+                            preprocError(
+                                    "autotune directive expects an optional 'default' keyword after grid initializer list",
+                                    line);
+                        }
+                    }
+                    if (args.size() != 4 && args.size() != 6) {
+                        preprocError("autotune directive expects either three or five arguments", line);
+                    }
+                    continue;
+                }
+                if (args.size() >= 3) {
+                    const std::string &autotune_constant = args[1];
+                    const std::string &autotune_range = args[2];
+                    auto range = parseArray(autotune_range);
+                    autotune_constants.emplace_back(autotune_constant, range);
+                }
+
+                if (args.size() == 5) {
+                    if (args[3] == "default") {
+                        const std::string &autotune_constant = args[1];
+                        int value = std::stoi(args[4]);
+                        default_autotune_constants[autotune_constant] = value;
+                    } else {
+                        preprocError(
+                                "autotune directive expects an optional 'default' keyword after grid initializer list",
+                                line);
                     }
                 }
-                if (args.size() != 3) {
-                    preprocError("autotune directive expects two arguments", line);
+                if (args.size() != 3 && args.size() != 5) {
+                    preprocError("autotune directive expects two or four arguments", line);
                 }
-                const std::string &autotune_constant = args[1];
-                const std::string &autotune_range = args[2];
-                auto range = parseArray(autotune_range);
-                autotune_constants.emplace_back(autotune_constant, range);
             } else if (directive == "argument") {
-                if (args.size() != 4) {
-                    preprocError("argument directive expects three arguments", line);
+                if (args.size() != 4 && args.size() != 5) {
+                    preprocError("argument directive expects three or four arguments", line);
                 }
                 const std::string &arg_idx_str = args[1];
                 int arg_idx = std::stoi(arg_idx_str);
@@ -281,7 +318,17 @@ int main(int argc, char *argv[]) {
                     }
                     value = value.substr(1, value.size() - 2);
                 }
-                kernel_arguments[arg_idx] = KernelArgument{dtype, value, is_malloc};
+                bool is_dst_ptr = false;
+                if (args.size() == 5) {
+                    auto postfix = args[4];
+                    if (postfix == "dst") {
+                        if (dtype != PTR) {
+                            preprocError("dst postfix can only be used for ptr type argument", line);
+                        }
+                        is_dst_ptr = true;
+                    }
+                }
+                kernel_arguments[arg_idx] = KernelArgument{dtype, value, is_malloc, is_dst_ptr};
             } else if (directive == "grid") {
                 if (args.size() != 3) {
                     preprocError("grid directive expects two arguments", line);
@@ -318,9 +365,21 @@ int main(int argc, char *argv[]) {
 
     initLLVM();
     mlir::MLIRContext *context = createContext();
-    if (!should_autotune) {
+    if (!should_autotune || noAutotune) {
+        auto source = content_out.str();
+        if (should_autotune) {
+            auto default_num_warps = default_intrinsic_autotune_constants["num_warps"];
+            if (default_num_warps != 0) {
+                numWarps = default_num_warps;
+            }
+            auto default_num_stages = default_intrinsic_autotune_constants["num_stages"];
+            if (default_num_stages != 0) {
+                numStages = default_num_stages;
+            }
+            source = applyTemplate(source, default_autotune_constants);
+        }
         try {
-            auto [ptxCode, shared_mem_bytes] = compile(context, content_out.str(), computeCapability, ptxVersion,
+            auto [ptxCode, shared_mem_bytes] = compile(context, source, computeCapability, ptxVersion,
                                                        numCTAs, numStages,
                                                        numWarps,
                                                        enableFpFusion,

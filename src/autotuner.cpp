@@ -97,13 +97,14 @@ void compile_thread() {
 
             // publish compiled kernel
             {
-                std::lock_guard guard{compiled_kernel_queue_mutex};
+                compiled_kernel_queue_mutex.lock();
                 compiled_kernels.push_back(CompiledKernel{
                         .ptx=ptx,
                         .shared_mem_bytes=shared_mem_bytes,
                         .autotune_values=values,
                         .intrinsic_autotune_values=intrinsic_values
                 });
+                compiled_kernel_queue_mutex.unlock();
             }
 
             if (++kernel_counter % 128 == 0) {
@@ -160,7 +161,7 @@ compileKernelPermutation(const std::string &codeTemplate,
             });
         }
         while (compile_tasks.size() >= MAX_QUEUE_SIZE) {
-            std::this_thread::yield();
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
         // advance permutation

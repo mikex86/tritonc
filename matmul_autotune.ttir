@@ -1,26 +1,20 @@
-#pragma autotune BLOCK_SIZE_M {64, 128, 256}
-#pragma autotune BLOCK_SIZE_N {64, 128, 256}
-#pragma autotune BLOCK_SIZE_K {32, 64}
-#pragma autotune GROUP_SIZE_M {12, 16, 20, 24}
-#pragma autotune intrinsic num_warps {2, 4, 8, 16}
-#pragma autotune intrinsic num_stages {3, 4, 5}
+#pragma autotune BLOCK_SIZE_M {128, 256} default 256
+#pragma autotune BLOCK_SIZE_N {128, 256} default 128
+#pragma autotune BLOCK_SIZE_K {32, 64} default 32
+#pragma autotune GROUP_SIZE_M {8, 12, 16, 20, 24} default 32
+#pragma autotune intrinsic num_warps {4, 8} default 8
+#pragma autotune intrinsic num_stages {3, 4, 5} default 3
 
 #pragma argument 0 ptr cuMalloc(8192 * 8192 * 2)
 #pragma argument 1 ptr cuMalloc(8192 * 8192 * 2)
 #pragma argument 2 ptr cuMalloc(8192 * 8192 * 2)
 
-// %arg3 = M
 #pragma argument 3 i32 8192
-// %arg4 = N
 #pragma argument 4 i32 8192
-// %arg5 = K
 #pragma argument 5 i32 8192
 
-// %arg6 = stride_am
 #pragma argument 6 i32 8192
-// %arg7 = stride_bk
 #pragma argument 7 i32 8192
-// %arg8 = stride_cm
 #pragma argument 8 i32 8192
 
 #pragma grid x ((8192 / ${BLOCK_SIZE_M}) * (8192 / ${BLOCK_SIZE_N}))

@@ -20,6 +20,7 @@ struct KernelArgument {
     KerArgDtype data_type;
     std::string init_expression;
     bool is_malloc;
+    bool is_dst_ptr;
 };
 
 struct KernelLaunchBounds {

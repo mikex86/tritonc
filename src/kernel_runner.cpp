@@ -6,6 +6,7 @@
 #include <curand.h>
 #include <cassert>
 #include <iostream>
+#include <thread>
 
 inline void cudaCheck(CUresult error, const char *file, int line) {
     if (error != CUDA_SUCCESS) {
@@ -75,6 +76,7 @@ float benchmarkKernel(CompiledKernel &kernel,
 
     std::vector<void *> kernel_params{};
     std::vector<CUdeviceptr> to_free{};
+    std::vector<std::pair<CUdeviceptr, size_t>> to_clear{};
 
     // build kernel arguments
     for (auto &argument: arguments) {
@@ -96,14 +98,17 @@ float benchmarkKernel(CompiledKernel &kernel,
             CUdeviceptr ptr{};
             CUDA_CHECK(cuMemAlloc_v2(&ptr, n_bytes));
 
-            // fill with random values to avoid making matmuls faster due to too many zero bits
-            // (yes that's a thing)
-            CUDA_CHECK(curandSetPseudoRandomGeneratorSeed(gen, 1234ULL));
+            if (argument.is_dst_ptr) {
+                to_clear.emplace_back(ptr, n_bytes);
+            } else {
+                // fill with random values to avoid making matmuls faster due to too many zero bits
+                // (yes that's a thing)
+                CUDA_CHECK(curandSetPseudoRandomGeneratorSeed(gen, 1234ULL));
 
-            // yes, we mis-interpret as floats. We don't care too much about the bit pattern
-            CUDA_CHECK(curandGenerateUniform(gen, reinterpret_cast<float *>(ptr), n_bytes / sizeof(float)));
-            CUDA_CHECK(cuCtxSynchronize());
-
+                // yes, we mis-interpret as floats. We don't care too much about the bit pattern
+                CUDA_CHECK(curandGenerateNormal(gen, reinterpret_cast<float *>(ptr), n_bytes / sizeof(float), 0.0f, 1.0f));
+                CUDA_CHECK(cuCtxSynchronize());
+            }
             to_free.push_back(ptr);
             *((uint64_t *) argument_memory) = ptr;
         } else {
@@ -143,8 +148,8 @@ float benchmarkKernel(CompiledKernel &kernel,
     CUDA_CHECK(cuEventCreate(&begin, 0));
     CUDA_CHECK(cuEventCreate(&end, 0));
 
-    CUDA_CHECK(cuEventRecord(begin, stream));
-    for (int i = 0; i < 64; i++) {
+    // warmup
+    for (int i = 0; i < 48; i++) {
         if (cuLaunchKernel(function,
                            gridX, gridY, gridZ,
                            32 * num_warps, 1, 1,
@@ -162,6 +167,27 @@ float benchmarkKernel(CompiledKernel &kernel,
             return -1.0f;
         }
     }
+    float totalMsElapsed = 0.0f;
+    CUDA_CHECK(cuEventRecord(begin, stream));
+    for (int i = 0; i < 1024; i++) {
+        CUDA_CHECK(
+                cuLaunchKernel(function,
+                               gridX, gridY, gridZ,
+                               32 * num_warps, 1, 1,
+                               kernel.shared_mem_bytes,
+                               stream,
+                               kernel_params.data(),
+                               nullptr)
+        );
+        /*
+        // clear result arrays to prevent additive results from skewing up results
+        for (auto &[ptr, byte_size]: to_clear) {
+            CUDA_CHECK(cuMemsetD8Async(ptr, 0, byte_size, stream));
+        }
+        if (!to_clear.empty()) {
+            CUDA_CHECK(cuStreamSynchronize(stream));
+        }*/
+    }
     CUDA_CHECK(cuEventRecord(end, stream));
     if (cuStreamSynchronize(stream) != CUDA_SUCCESS) {
         for (auto ptr: to_free) {
@@ -172,9 +198,7 @@ float benchmarkKernel(CompiledKernel &kernel,
         }
         return -1.0f;
     }
-
-    float timeElapsedMs{};
-    CUDA_CHECK(cuEventElapsedTime(&timeElapsedMs, begin, end));
+    CUDA_CHECK(cuEventElapsedTime(&totalMsElapsed, begin, end));
     CUDA_CHECK(cuStreamDestroy_v2(stream));
 
     for (auto ptr: to_free) {
@@ -183,6 +207,5 @@ float benchmarkKernel(CompiledKernel &kernel,
     for (auto param: kernel_params) {
         free(param);
     }
-
-    return timeElapsedMs;
+    return totalMsElapsed;
 }
