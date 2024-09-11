@@ -60,6 +60,7 @@ sudo make install
 
 ##### Hot to build tritonc
 
+Make sure you have the CUDA sdk installed and that cuda is in your system include path.
 With LLVM built and installed, you can now build tritonc.
 
 ```commandline
