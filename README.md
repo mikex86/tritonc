@@ -46,16 +46,16 @@ tritonc add_kernel.ttir --compute-capability 89 --num-stages 3 --num-warps 4 -o 
 #### Build LLVM
 
 The required llvm version is a submodule of this repository under `third_party/llvm-project`.
-
 Build-install the llvm-project system-wide.
+Make sure to install `ninja-build` for fast builds!
 
 ```commandline
 cd third_party/llvm-project
 mkdir build
 cd build
-cmake -G Ninja ../llvm -DLLVM_ENABLE_PROJECTS=mlir -DLLVM_BUILD_EXAMPLES=ON -DLLVM_TARGETS_TO_BUILD="Native;NVPTX;AMDGPU" -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON
+cmake -G Ninja ../llvm -DLLVM_ENABLE_PROJECTS=mlir -DLLVM_BUILD_EXAMPLES=ON -DLLVM_TARGETS_TO_BUILD="Native;NVPTX;AMDGPU" -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON -DCMAKE_INSTALL_PREFIX=/usr/local
 cmake --build .
-sudo make install
+sudo cmake --build . --target install
 ```
 
 ##### Hot to build tritonc

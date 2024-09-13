@@ -289,7 +289,7 @@ int main(int argc, char *argv[]) {
 
                 const std::string &dtype_str = args[2];
                 std::string value = args[3];
-                if (arg_idx <= kernel_arguments.size()) {
+                if (arg_idx >= kernel_arguments.size()) {
                     kernel_arguments.resize(arg_idx + 1);
                 }
                 KerArgDtype dtype{};

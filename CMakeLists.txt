@@ -26,7 +26,6 @@ add_executable(tritonc src/main.cpp
         src/tinyscript.cpp
         src/templating.cpp)
 target_link_libraries(tritonc PRIVATE argparse)
-target_link_libraries(tritonc PRIVATE cuda curand)
 
 get_property(triton_libs GLOBAL PROPERTY TRITON_LIBS)
 
@@ -112,3 +111,12 @@ set(TRITON_GENERATED_INCLUDE_DIRS
 
 target_include_directories(tritonc PRIVATE ${TRITON_INCLUDE_DIRS})
 target_include_directories(tritonc PRIVATE ${TRITON_GENERATED_INCLUDE_DIRS})
+
+# include cuda headers
+set(CMAKE_CUDA_ARCHITECTURES 75)
+set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)
+enable_language(CUDA)
+find_library(CUDA_LIBRARY cuda ${CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES})
+find_library(CURAND_LIBRARY curand ${CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES})
+target_include_directories(tritonc PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+target_link_libraries(tritonc PRIVATE ${CUDA_LIBRARY} ${CURAND_LIBRARY})
